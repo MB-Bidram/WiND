@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wind"
+version = "2.1.0"
+description = "Next-generation WiND library (Wind + WiNC)"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wind*", "winc*"]
+
+[tool.setuptools.package-dir]
+"flashpkm" = "Lib/flashpkm"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

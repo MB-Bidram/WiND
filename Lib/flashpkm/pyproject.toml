@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashpkm"
+version = "1.0.0"
+description = "Optimized Triton kernels and implementations for Product-Key Memory retrieval"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flashpkm*"]
