@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: wind
-Version: 2.1.0
-Summary: Next-generation WiND library (Wind + WiNC)
-Requires-Python: >=3.10
-Requires-Dist: torch>=2.0
