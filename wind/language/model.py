@@ -299,7 +299,7 @@ class LanguageModel(WindModule):
                 states = alpha * states + (1 - alpha) * self.state_norm(states)
         return ReasoningState(self.state_norm(states))
 
-    def _decode(self, ids, state, *, cache=None, use_cache=False, offset=0):
+    def _decode(self, ids, state, *, cache=None, use_cache=False, offset=0, last_only=False):
         if (state.tokens.ndim != 3 or state.tokens.size(0) != ids.size(0) or
                 state.tokens.size(1) < 1 or state.tokens.size(-1) != self.config.dim):
             raise ValueError("state must have matching batch, nonempty tokens and model dim")
@@ -325,7 +325,11 @@ class LanguageModel(WindModule):
                         next_cache.append(kv)
                 else:
                     x = self._run(block, x, state.tokens, causal=True)
-        return self.lm_head(self.final_norm(x)), next_cache if use_cache and not isinstance(cache, GenerationCache) else None
+                if last_only:
+                    # Generation consumes only the final position; skip the final norm
+                    # and the vocabulary projection for positions that are discarded.
+                     x = x[:, -1:]
+                return self.lm_head(self.final_norm(x)), next_cache if use_cache and not isinstance(cache, GenerationCache) else None
 
     def forward(self, input_ids=None, *, labels=None, decoder_input_ids=None,
                 attention_mask=None, features=None, state=None):
@@ -356,8 +360,9 @@ class LanguageModel(WindModule):
                 assert_dtype(labels, torch.long, "labels", self)
             if labels.shape != decoder_input_ids.shape:
                 raise ValueError("labels and decoder_input_ids must have the same shape")
-            targets = labels.masked_fill(labels == self.config.pad_token_id, -100)
-            count_tensor = (targets != -100).sum()
+            ignore_mask = (labels == self.config.pad_token_id) | (labels == -100)
+            targets = labels.masked_fill(ignore_mask, -100)
+            count_tensor = (~ignore_mask).sum()
             # Compute loss in FP32 for numerical stability; BF16 has only 7 exponent
             # bits, which can cause overflow in the log-softmax of large vocabularies.
             # FP16 native cross_entropy is stable enough.
@@ -402,7 +407,8 @@ class LanguageModel(WindModule):
         Restores the caller's train/eval setting. No request cache is retained.
 
         Optimizations:
-        - preallocates output tensor instead of torch.cat each step
+        - preallocates output and uncached-history tensors instead of torch.cat
+        - projects only the final decoder position during generation
         - avoids per-step CPU sync from done.all().item()
         - minimizes repeated config lookups
         - avoids unnecessary logits.clone()
@@ -478,12 +484,14 @@ class LanguageModel(WindModule):
             # Optional uncached history path if use_cache=False
             # We keep history only in this branch.
             if not use_cache:
-                history = torch.full(
-                    (batch_size, 1),
-                    bos_token_id,
+                # BOS + generated tokens. Only the written prefix
+                # history[:, :step + 1] is ever read, so empty is sufficient.
+                history = torch.empty(
+                    (batch_size, max_new_tokens + 1),
                     dtype=torch.long,
                     device=device,
                 )
+                history[:, 0] = bos_token_id
 
             produced = max_new_tokens
 
@@ -500,19 +508,19 @@ class LanguageModel(WindModule):
                         cache = next_cache
                 else:
                     logits, next_cache = self._decode(
-                        history,
+                        history[:, :step + 1],
                         state,
                         cache=None,
                         use_cache=False,
                         offset=0,
+                        last_only=True,
                     )
 
                 scores = logits[:, -1, :]
 
-                # We only need a mutable tensor if we're going to modify values.
-                # clone() is safer if _decode returns a view into something reused,
-                # but do it once here rather than more expensive patterns.
-                scores = scores.clone()
+                # lm_head allocates a fresh output on every call and logits is
+                # not read after this point, so the view can be mutated in place
+                # instead of copying [batch, vocab_size] each step.
 
                 # Never emit PAD/BOS
                 scores[:, pad_token_id] = -torch.inf
@@ -539,7 +547,7 @@ class LanguageModel(WindModule):
                 done |= token.eq(eos_token_id)
 
                 if not use_cache:
-                    history = torch.cat((history, token.unsqueeze(1)), dim=1)
+                    history[:, step + 1] = token
 
                 cur = token.unsqueeze(1)
 
@@ -571,5 +579,3 @@ class LanguageModel(WindModule):
             model = cls(LMConfig(**config_dict))
         model.load_state_dict(data["model"])
         return model.to(device).eval()
-
-
