@@ -6,7 +6,7 @@ language-model API, training utilities, `torch.compile` integration, and
 architecture-level runtime inspection.
 
 For the WideNDepth architecture and its research context, see
-[MB-Bidram/WideNDepth](https://github.com/MB-Bidram/WideNDepth).
+MB-Bidram/WideNDepth.
 
 ## Installation
 
