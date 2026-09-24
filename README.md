@@ -252,9 +252,6 @@ deviation are needed, because they add measurement overhead.
 | --- | --- |
 | `wind/` | public model, training, adapter, and profiling APIs |
 | `windbreaker/` | optional architecture-level inspection package |
-| `examples/` | runnable usage examples |
-| `benchmarks/` | repeatable performance benchmarks |
-| `experiments/` | controlled architecture and performance experiments |
 | `tests/` | correctness and regression tests |
 
 ## Testing
