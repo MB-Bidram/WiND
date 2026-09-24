@@ -10,7 +10,7 @@ MB-Bidram/WideNDepth.
 
 ## Installation
 
-WiND requires Python 3.10+ and PyTorch 2.0+.
+WiND requires Python 3.10+ and PyTorch 2.0+ (Triton >= 2.1 needed for FlashPKM).
 
 ```bash
 pip install .
