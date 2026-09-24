@@ -239,7 +239,9 @@ def pkm_retrieve_aggregate_f2_kernel(
         other=-float("inf"),
     ).to(tl.float32)
 
-    has_valid = tl.max(scores > -float("inf"), axis=0)
+    # Triton reductions over bool currently return an integer scalar.  Convert
+    # it back to a predicate before using it as a load mask below.
+    has_valid = tl.max((scores > -float("inf")).to(tl.int32), axis=0) != 0
     score_max = tl.max(scores, axis=0)
 
     shifted_scores = tl.where(scores == -float("inf"), -float("inf"), scores - score_max)

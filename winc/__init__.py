@@ -117,9 +117,6 @@ from .pkm import (
     PKMAvailable,
     make_pkm_wide,
     pkm_available,
-    FactorizedPKM,
-    PKMWide,
-    QueryEncoder,
 )
 from .smart_compile import (
     compile,
@@ -166,3 +163,11 @@ __all__ = [
     "compile", "CompileConfig", "CompileProgress", "get_compile_stats",
     "reset_compile_stats",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily expose optional FlashPKM classes without importing them on CPU."""
+    if name in {"FactorizedPKM", "PKMWide", "QueryEncoder"}:
+        from . import pkm
+        return getattr(pkm, name)
+    raise AttributeError(name)

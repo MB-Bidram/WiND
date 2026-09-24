@@ -11,6 +11,10 @@ dependencies = [
     "torch>=2.0",
 ]
 
+[project.optional-dependencies]
+# Dense WiND is dependency-free apart from PyTorch.  PKM is explicitly opt-in.
+pkm = ["flashpkm>=1.2.0"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["wind*", "winc*"]

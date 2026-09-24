@@ -144,12 +144,7 @@ from winc.pkm import (
     make_pkm_wide,
     PKMAvailable as _PKMAvailable,
     pkm_available,
-    FactorizedPKM,
-    PKMWide,
-    QueryEncoder,
 )
-
-pkm_kernels_available = pkm_available()
 
 __all__ = [
     "Sequential", "Wide", "WideStack", "StageMode", "apply_mode",
@@ -197,4 +192,13 @@ __all__ = [
 
 __version__ = "2.1.0"
 
+
+def __getattr__(name: str):
+    """Resolve optional PKM symbols only when a caller explicitly requests them."""
+    if name == "pkm_kernels_available":
+        return pkm_available()
+    if name in {"FactorizedPKM", "PKMWide", "QueryEncoder"}:
+        import winc.pkm as _pkm
+        return getattr(_pkm, name)
+    raise AttributeError(name)
 

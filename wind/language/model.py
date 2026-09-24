@@ -66,9 +66,10 @@ class ReasoningState:
 
 @dataclass
 class LMOutput:
-    logits: torch.Tensor
+    logits: torch.Tensor | None
     loss: torch.Tensor | None = None
-    token_count: torch.Tensor = None  # 0-d int tensor; stays on-device under torch.compile
+    token_count: torch.Tensor | None = None  # Detached 0-d integer tensor.
+
 
 
 class _Block(nn.Module):
@@ -100,7 +101,7 @@ class _Block(nn.Module):
                                 position_offset=position_offset)
         x = x + y
         new_cross = None
-        if self.cross is not None:
+        if self.cross is not None and memory is not None:
             y, new_cross = self.cross(self.cross_norm(x), memory, cache=old_cross,
                                       static=True, use_cache=use_cache)
             x = x + y
@@ -237,7 +238,11 @@ class LanguageModel(WindModule):
                               use_reentrant=False)
         return block(x, memory, **kwargs)[0]
 
-    def encode(self, input_ids=None, *, attention_mask=None, features=None):
+    def encode(self, input_ids=None, *, attention_mask=None, features=None,
+               bank_read_policy: str = "normal", bank_override: torch.Tensor | None = None,
+               bank_swap: bool = False, state_freeze_after: int | None = None,
+               reasoning_iterations: int | None = None, wide_policy: str = "normal",
+               encoder_policy: str = "normal", knowledge_swap: bool = False):
         """Encode source IDs OR adapter features; True/1 mask entries are valid.
 
         Features must be [batch, tokens, dim] on the model device. No target
@@ -245,6 +250,14 @@ class LanguageModel(WindModule):
         """
         if (input_ids is None) == (features is None):
             raise ValueError("provide exactly one of input_ids or features")
+        if bank_read_policy not in {"normal", "first_only", "none"}:
+            raise ValueError("bank_read_policy must be 'normal', 'first_only', or 'none'")
+        if state_freeze_after is not None and state_freeze_after < 0:
+            raise ValueError("state_freeze_after must be nonnegative or None")
+        if reasoning_iterations is not None and reasoning_iterations < 1:
+            raise ValueError("reasoning_iterations must be positive or None")
+        if wide_policy not in {"normal", "skip"} or encoder_policy not in {"normal", "skip"}:
+            raise ValueError("wide_policy and encoder_policy must be 'normal' or 'skip'")
         c = self.config
         if input_ids is not None:
             self._ids(input_ids, "input_ids", c.max_source_length)
@@ -275,23 +288,40 @@ class LanguageModel(WindModule):
         # Wide-stage residual: scale depends on which component self.wide is.
         # - Wide (sum of N branches): divide by sqrt(N) for variance stability.
         # - PKMWide (single retrieval path, output_mode="none"): no scaling needed.
-        wide_out = self.wide(x)
-        if hasattr(self.wide, "mode") and self.wide.mode == "sum":
-            x = x + wide_out / math.sqrt(c.width)
-        elif hasattr(self.wide, "output_mode") and self.wide.output_mode == "none":
-            x = x + wide_out
-        else:
-            x = x + wide_out / math.sqrt(c.width)
+        if wide_policy == "normal":
+            wide_out = self.wide(x)
+            if hasattr(self.wide, "mode") and self.wide.mode == "sum":
+                x = x + wide_out / math.sqrt(c.width)
+            elif hasattr(self.wide, "output_mode") and self.wide.output_mode == "none":
+                x = x + wide_out
+            else:
+                x = x + wide_out / math.sqrt(c.width)
         mask = valid[:, None, None, :]
         with _profile_range("encoder_stack"):
-            for block in self.encoder:
-                x = self._run(block, x, mask=mask)
+            if encoder_policy == "normal":
+                for block in self.encoder:
+                    x = self._run(block, x, mask=mask)
+        if knowledge_swap:
+            # Valid encoded representations from another request, preserving
+            # shape and all downstream execution. Experimental only.
+            x = x.roll(1, dims=0)
         states, bank = self.compressor(x, mask), self.bank(x, mask)
+        if bank_override is not None:
+            if bank_override.shape != bank.shape:
+                raise ValueError("bank_override must match the constructed bank shape")
+            bank = bank_override
+        if bank_swap:
+            bank = bank.roll(1, dims=0)
         # Every depth layer is used on EVERY reasoning iteration.
         with _profile_range("depth_stack"):
-            for _ in range(c.iterations):
+            for iteration in range(c.iterations if reasoning_iterations is None else reasoning_iterations):
                 for block in self.depth:
-                    states = self._run(block, states, bank)
+                    previous = states
+                    read_bank = bank if (bank_read_policy == "normal" or
+                                         (bank_read_policy == "first_only" and iteration == 0)) else None
+                    states = self._run(block, states, read_bank)
+                    if state_freeze_after is not None and iteration >= state_freeze_after:
+                        states = previous
         # Alpha learning: learnable interpolation between encoder output and state.
         if self.alpha is not None:
             with _profile_range("alpha_blend"):
@@ -328,11 +358,15 @@ class LanguageModel(WindModule):
                 if last_only:
                     # Generation consumes only the final position; skip the final norm
                     # and the vocabulary projection for positions that are discarded.
-                     x = x[:, -1:]
-                return self.lm_head(self.final_norm(x)), next_cache if use_cache and not isinstance(cache, GenerationCache) else None
+                    x = x[:, -1:]
+        return self.lm_head(self.final_norm(x)), next_cache if use_cache and not isinstance(cache, GenerationCache) else None
 
     def forward(self, input_ids=None, *, labels=None, decoder_input_ids=None,
-                attention_mask=None, features=None, state=None):
+                attention_mask=None, features=None, state=None,
+                bank_read_policy: str = "normal", bank_override: torch.Tensor | None = None,
+                bank_swap: bool = False, state_freeze_after: int | None = None,
+                reasoning_iterations: int | None = None, wide_policy: str = "normal",
+                encoder_policy: str = "normal", knowledge_swap: bool = False):
         if state is not None and any(v is not None for v in (input_ids, features, attention_mask)):
             raise ValueError("provide state or source inputs, not both")
         if labels is not None:
@@ -347,7 +381,13 @@ class LanguageModel(WindModule):
             raise ValueError("provide labels or decoder_input_ids")
         self._ids(decoder_input_ids, "decoder_input_ids", self.config.max_target_length)
         if state is None:
-            state = self.encode(input_ids, attention_mask=attention_mask, features=features)
+            state = self.encode(
+                input_ids, attention_mask=attention_mask, features=features,
+                bank_read_policy=bank_read_policy, bank_override=bank_override,
+                bank_swap=bank_swap, state_freeze_after=state_freeze_after,
+                reasoning_iterations=reasoning_iterations,
+                wide_policy=wide_policy, encoder_policy=encoder_policy, knowledge_swap=knowledge_swap,
+            )
         with _profile_range("output_projection_and_loss"):
             logits, _ = self._decode(decoder_input_ids, state)
         loss, count = None, 0

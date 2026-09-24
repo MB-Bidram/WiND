@@ -148,13 +148,18 @@ def make_pkm_wide(
     )
 
 
-# --- Convenience re-exports for advanced users who need direct PKM classes ---
-# These are not the primary WiND API (WiND uses make_pkm_wide for construction),
-# but are provided through the bridge for inspection/training purposes.
-# Requirement 17: Do not expose FlashPKM classes as primary WiND API.
-try:
-    from flashpkm import FactorizedPKM, PKMWide, QueryEncoder
-    _PKM_CLASSES_AVAILABLE = True
-except ImportError:
-    FactorizedPKM = PKMWide = QueryEncoder = None
-    _PKM_CLASSES_AVAILABLE = False
+# Convenience re-exports are deliberately lazy.  Importing a dense WiND model
+# must not import optional FlashPKM/Triton modules merely to expose names.
+_PKM_CLASS_NAMES = {"FactorizedPKM", "PKMWide", "QueryEncoder"}
+
+
+def __getattr__(name: str):
+    if name in _PKM_CLASS_NAMES:
+        try:
+            import flashpkm
+        except ImportError as exc:
+            raise AttributeError(
+                f"{name} requires the optional FlashPKM dependency; install wind[pkm]"
+            ) from exc
+        return getattr(flashpkm, name)
+    raise AttributeError(name)

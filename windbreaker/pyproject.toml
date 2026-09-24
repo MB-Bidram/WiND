@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "windbreaker"
+version = "0.1.0"
+description = "Non-invasive architecture inspection hooks for WiND"
+requires-python = ">=3.10"
+dependencies = ["wind>=2.1.0", "torch>=2.0"]
+
+[tool.setuptools]
+packages = ["windbreaker"]
+package-dir = {"" = ".."}

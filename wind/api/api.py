@@ -28,13 +28,25 @@ from winc.runtime import HardwareProfile, OptimizedBackend
 
 @dataclass(frozen=True)
 class Config:
-    """Small, stable set of knobs shared by WND-family models."""
+    """Small, stable set of knobs shared by WND-family models.
+
+    ``depth`` is the number of distinct reasoning layers.  In the generic
+    :func:`build` path, ``iterations`` is the number of *layer applications*:
+    :class:`winc.ReasoningDepth` selects ``layers[i % depth]`` once for each
+    iteration.  This intentionally differs from ``LanguageModel``; see the
+    README execution contract before changing either value.
+
+    ``state_tokens`` controls Compressor output while ``bank_tokens`` controls
+    FeatureBank capacity.  They default to the same value for compatibility,
+    but are independently configurable.
+    """
 
     dim: int
     heads: int = 8
     depth: int = 6
     width: int = 1
     iterations: int = 1
+    state_tokens: int = 64
     bank_tokens: int = 64
     read_tokens: int = 8
     attention: str = "mla"
@@ -53,8 +65,8 @@ class Config:
     pkm_similarity: str = "cosine"   # "cosine" (recommended) or "dot"
 
     def __post_init__(self):
-        if self.dim < 1 or self.heads < 1 or self.depth < 1 or self.width < 1:
-            raise ValueError("dim, heads, depth and width must be positive")
+        if self.dim < 1 or self.heads < 1 or self.depth < 1 or self.width < 1 or self.iterations < 1:
+            raise ValueError("dim, heads, depth, width and iterations must be positive")
         if self.dim % self.heads:
             raise ValueError("dim must be divisible by heads")
         if self.attention not in {"mla", "nsa"}:
@@ -73,8 +85,8 @@ class Config:
             raise ValueError(f"pkm_value_dtype must be 'float32', 'float16', or 'bfloat16', got: {self.pkm_value_dtype}")
         if self.pkm_similarity not in {"cosine", "dot"}:
             raise ValueError("pkm_similarity must be 'cosine' or 'dot'")
-        if self.bank_tokens < 1 or self.read_tokens < 1:
-            raise ValueError("bank_tokens and read_tokens must be positive")
+        if self.state_tokens < 1 or self.bank_tokens < 1 or self.read_tokens < 1:
+            raise ValueError("state_tokens, bank_tokens and read_tokens must be positive")
         if self.mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be positive")
 
@@ -209,7 +221,7 @@ def _construct_model(
     return WideNDepth(
         wide=wide if wide is not None else default_wide,
         encoder=encoder if encoder is not None else default_encoder,
-        compressor=compressor if compressor is not None else Compressor(config.dim, config.bank_tokens),
+        compressor=compressor if compressor is not None else Compressor(config.dim, config.state_tokens),
         depth=reasoning_depth,
         dim=config.dim,
         bank_tokens=config.bank_tokens,

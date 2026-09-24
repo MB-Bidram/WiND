@@ -115,7 +115,15 @@ class FeatureBank(WindModule):
 
 
 class AdaptiveFeatureBank(FeatureBank):
-    """Importance-ranked bank with a hard token budget."""
+    """Importance-ranked bank with a hard token budget.
+
+    Top-k membership is necessarily discrete, but for ``detach=False`` the
+    selected score values also form a softmax weighting.  Consequently task
+    loss has a differentiable path to ``score.weight`` for selected entries;
+    without this weighting, ``topk(...).indices`` would leave the scorer with
+    no task-loss gradient.  ``detach=True`` deliberately remains a detached
+    inference boundary, like :class:`FeatureBank`.
+    """
     def __init__(self, dim: int, max_tokens: int = 64, detach: bool = True):
         super().__init__(dim, max_tokens, detach); self.score = nn.Linear(dim, 1)
     def forward(self, features):
@@ -125,8 +133,13 @@ class AdaptiveFeatureBank(FeatureBank):
                 idx = self.score(features).squeeze(-1).topk(self.max_tokens, dim=1).indices
                 selected = features.gather(1, idx.unsqueeze(-1).expand(-1, -1, features.size(-1)))
         else:
-            idx = self.score(features).squeeze(-1).topk(self.max_tokens, dim=1).indices
+            scores = self.score(features).squeeze(-1)
+            idx = scores.topk(self.max_tokens, dim=1).indices
             selected = features.gather(1, idx.unsqueeze(-1).expand(-1, -1, features.size(-1)))
+            # Keep the scale near the unweighted representation while making
+            # selected score values differentiable from task loss.
+            selected_scores = scores.gather(1, idx)
+            selected = selected * (selected_scores.softmax(dim=1) * self.max_tokens).unsqueeze(-1)
         return super().forward(selected)
 
 
@@ -179,7 +192,14 @@ class Retrieval(WindModule):
 
 
 class ReasoningDepth(WindModule):
-    """Iterative depth stack with bounded, read-only bank retrieval."""
+    """Iterative depth stack with bounded retrieval.
+
+    Generic WND deliberately executes **one** layer per iteration, cycling
+    through ``layers``.  Thus ``depth=6, iterations=1`` executes layer 0 once;
+    ``iterations=8`` executes layers 0..5, then 0..1.  This is not the same
+    iteration convention as ``wind.LanguageModel``, whose iteration executes
+    its complete depth stack.
+    """
 
     def __init__(self, layers: nn.Module | list[nn.Module] | tuple[nn.Module, ...],
                  dim: int, iterations: int = 1, read_tokens: int = 8):
@@ -195,13 +215,32 @@ class ReasoningDepth(WindModule):
         self.retrieval = Retrieval(dim, read_tokens)
         self.gate = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x: torch.Tensor, bank: torch.Tensor) -> torch.Tensor:
-        bank_cache = self.retrieval.prepare_bank(bank)
+    def forward(self, x: torch.Tensor, bank: torch.Tensor, *,
+                bank_read_policy: str = "normal", state_freeze_after: int | None = None) -> torch.Tensor:
+        """Run cyclic reasoning with an explicit, inference-useful ablation policy.
+
+        ``bank_read_policy`` is deliberately narrow: ``normal`` reads on every
+        iteration, ``first_only`` reads only iteration zero, and ``none`` skips
+        Retrieval entirely.  It exists so experiment tooling can perform a
+        causal intervention without replacing modules or monkeypatching a
+        forward.  The default path is byte-for-byte the former behavior.
+        ``state_freeze_after`` discards later state updates after the given
+        zero-based iteration while still executing those layers.
+        """
+        if bank_read_policy not in {"normal", "first_only", "none"}:
+            raise ValueError("bank_read_policy must be 'normal', 'first_only', or 'none'")
+        if state_freeze_after is not None and state_freeze_after < 0:
+            raise ValueError("state_freeze_after must be nonnegative or None")
+        bank_cache = self.retrieval.prepare_bank(bank) if bank_read_policy != "none" else None
         for index in range(self.iterations):
             layer = self.layers[index % len(self.layers)]
-            context = self.retrieval(x, bank_cache=bank_cache)
-            x = x + torch.sigmoid(self.gate) * context
+            previous = x
+            if bank_read_policy == "normal" or (bank_read_policy == "first_only" and index == 0):
+                context = self.retrieval(x, bank_cache=bank_cache)
+                x = x + torch.sigmoid(self.gate) * context
             x = layer(x)
+            if state_freeze_after is not None and index >= state_freeze_after:
+                x = previous
         return x
 
 
@@ -224,7 +263,9 @@ class WideNDepth(WindModule):
             depth, dim, iterations=iterations, read_tokens=read_tokens
         )
 
-    def forward(self, x: torch.Tensor, *, return_aux: bool = False):
+    def forward(self, x: torch.Tensor, *, return_aux: bool = False,
+                bank_read_policy: str = "normal", bank_override: torch.Tensor | None = None,
+                bank_swap: bool = False, state_freeze_after: int | None = None):
         branch_outputs = None
         if return_aux and hasattr(self.wide, "forward_with_branches"):
             knowledge, branch_outputs = self.wide.forward_with_branches(x)
@@ -235,7 +276,15 @@ class WideNDepth(WindModule):
         # separately compressed stream and may only retrieve bounded slices.
         compressed = self.compressor(encoded)
         bank = self.bank(encoded)
-        output = self.depth(compressed, bank)
+        selected_bank = bank if bank_override is None else bank_override
+        # Batch rotation supplies valid but wrong request-local content. It is
+        # intentionally an experiment-only intervention, not a persistent bank.
+        if bank_swap:
+            selected_bank = selected_bank.roll(1, dims=0)
+        output = self.depth(
+            compressed, selected_bank,
+            bank_read_policy=bank_read_policy, state_freeze_after=state_freeze_after,
+        )
         if return_aux:
             return output, {"knowledge": encoded, "compressed": compressed,
                             "bank": bank, "branches": branch_outputs}

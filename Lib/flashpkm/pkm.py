@@ -768,8 +768,6 @@ class FactorizedPKM(WindModule):
                         selected_scores_flat,
                         selected_memory_flat,
                         values,
-                        H,
-                        M,
                     ).reshape(B, S, H, V)
                 if _was_3d:
                     output = output.squeeze(2)
